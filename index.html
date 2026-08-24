@@ -1567,6 +1567,13 @@ const sourceLabel = { gravado:'gravado agora', importado:'arquivo importado', de
 function escapeAttr(s){
 return String(s==null?'':s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
 }
+// "tesoura tesoura" (criança repetindo a mesma palavra) não é uma alucinação do Whisper — é a
+// própria produção da criança. Usado só pra não marcar esse caso normal como suspeito no aviso
+// de alucinação (ver possiblyHallucinated em renderWordList).
+function isRepeatedSingleWord(text){
+const parts = (text||'').trim().toLowerCase().split(/\s+/).filter(Boolean);
+return parts.length>1 && parts.every(p=>p===parts[0]);
+}
 function getProducedText(i){
 if(producedText[i] !== undefined) return producedText[i];
 // Pedido explícito: o campo vem VAZIO por padrão — só recebe conteúdo depois de uma
@@ -1661,8 +1668,13 @@ const matchWarning = matchesTarget ? `
 // texto devolvido ter mais palavras do que uma única produção infantil plausível teria. Não dá
 // pra detectar alucinação com certeza sem ouvir o áudio, mas sinalizar esse caso evita que uma
 // frase inventada passe despercebida pela revisão.
+// LIMIAR: era >=4 palavras, mas em teste real com whisper-base uma alucinação de só 2 palavras
+// ("Cadê ainda?" pra "Cadeira") passou batida por esse limiar — o protocolo é nomeação de UMA
+// palavra só (ver título da tarefa), então qualquer coisa além de 1-2 palavras já é suspeita.
+// Baixado pra >=2 pra pegar esse caso; ainda deixa passar repetição simples de 1 palavra
+// (ex.: "tesoura tesoura", conta 2 mas não é uma frase inventada) sem marcar como alucinação.
 const wordCount = producedNow.trim() ? producedNow.trim().split(/\s+/).length : 0;
-const possiblyHallucinated = autoTranscribed[i] && !matchesTarget && wordCount>=4;
+const possiblyHallucinated = autoTranscribed[i] && !matchesTarget && wordCount>=2 && !isRepeatedSingleWord(producedNow);
 const hallucinationWarning = possiblyHallucinated ? `
 <div class="asr-match-warning">⚠️ O texto transcrito tem ${wordCount} palavras para o que deveria ser uma única palavra — pode ser uma "alucinação" do modelo (ele inventa uma frase quando o áudio é muito curto). Ouça a gravação e confira com atenção antes de confiar neste resultado.</div>` : '';
 const altChips = alternatives.length ? `
