@@ -1392,21 +1392,26 @@ delete producedAlternatives[i];
 if(text){
 producedText[i] = text;
 autoTranscribed[i] = true;
-// Segunda leitura, só quando a transcrição bate EXATAMENTE com a palavra-alvo: é justamente
-// o cenário em que o modelo pode ter "corrigido" um desvio real da criança de volta pra
-// forma-dicionário (ver nota de metodologia acima e o aviso correspondente em
-// renderWordList). Confirmado lendo o código-fonte do transformers.js@2.17.2: a pipeline de
-// ASR SEMPRE colapsa a decodificação numa única hipótese, mesmo passando num_beams/
-// num_return_sequences>1 (limitação da própria lib, não é bug nosso) — então não dá pra
-// pedir um "top-3" de beam search por essa API. Em vez disso, fazemos UMA segunda passada
-// com amostragem (do_sample+temperature>0, ao invés de greedy): se o modelo "hesitar" entre
-// a palavra-alvo e outra leitura, essa segunda passada tem chance real de divergir da
-// primeira e expor essa hesitação como hipótese alternativa clicável (ver alternatives/
-// altChips em renderWordList). Só roda nesse cenário específico, pra não pagar o custo extra
-// nos casos que já não são suspeitos. NÃO TESTADO ponta-a-ponta neste ambiente de
-// desenvolvimento (sem microfone/áudio real aqui) — validar no navegador antes de confiar.
+// Segunda leitura, só nos dois cenários em que a primeira transcrição é suspeita:
+// 1) bate EXATAMENTE com a palavra-alvo — o modelo pode ter "corrigido" um desvio real da
+//    criança de volta pra forma-dicionário (ver nota de metodologia acima).
+// 2) tem 2+ palavras pra uma tarefa de UMA palavra só (mesmo limiar de renderWordList) e não é
+//    só a criança repetindo a palavra — sinal de alucinação (ver TRANSCRIBE_HALLUCINATION_HINT/
+//    possiblyHallucinated). Achado real: "cadeira" virou "Cadê ainda?" e antes disto não havia
+//    segunda opinião nenhuma pro profissional comparar, só o aviso.
+// Confirmado lendo o código-fonte do transformers.js@2.17.2: a pipeline de ASR SEMPRE colapsa a
+// decodificação numa única hipótese, mesmo passando num_beams/num_return_sequences>1 (limitação
+// da própria lib, não é bug nosso) — então não dá pra pedir um "top-3" de beam search por essa
+// API. Em vez disso, fazemos UMA segunda passada com amostragem (do_sample+temperature>0, ao
+// invés de greedy): se o modelo "hesitar", essa segunda passada tem chance real de divergir da
+// primeira e expor isso como hipótese alternativa clicável (ver alternatives/altChips em
+// renderWordList). Só roda nesses dois cenários, pra não pagar o custo extra à toa. Testado
+// ponta-a-ponta com Playwright + microfone simulado (voz sintetizada via TTS) — ver commits.
 const targetWord = (targetWords[i] && targetWords[i].word || '').trim().toLowerCase();
-if(targetWord && text.toLowerCase() === targetWord){
+const textWordCount = text.split(/\s+/).filter(Boolean).length;
+const suspiciousMatch = targetWord && text.toLowerCase() === targetWord;
+const suspiciousHallucination = textWordCount >= 2 && !isRepeatedSingleWord(text);
+if(suspiciousMatch || suspiciousHallucination){
 try{
 const altResult = await transcriber(asrInput, {
 language: 'portuguese',
