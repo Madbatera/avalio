@@ -1,0 +1,10 @@
+## Sistema
+.DS_Store
+Thumbs.db
+
+## Materiais de referência com direitos autorais (não versionar)
+/referencias/
+
+## Dados de pacientes — informação clínica sensível, NUNCA versionar
+/dados-pacientes/
+*.docx
