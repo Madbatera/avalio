@@ -4,6 +4,13 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<!-- O app só tem tema claro implementado (ver auditoria) — sem isto, navegador/SO em modo
+     escuro força um "dark mode automático" nos elementos nativos (inputs, scrollbars, controles
+     de formulário) sem tocar no CSS custom da página, resultando na sidebar/cards com aparência
+     quebrada/inconsistente relatada em teste real. Fix definitivo é dar suporte a dark mode de
+     verdade (achado do audit anterior); isto aqui trava o comportamento em claro enquanto isso
+     não é feito. -->
+<meta name="color-scheme" content="light">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Avalio">
@@ -15,6 +22,7 @@
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&display=swap" rel="stylesheet">
 <style>
 :root{
+color-scheme: light; /* reforça o <meta name="color-scheme"> acima — só tema claro por enquanto */
 /* Paleta "moderna e acolhedora": teal como única cor de marca (calma, associada a
 cuidado/saúde, foge do azul/roxo genérico de IA), neutros levemente quentes em vez de
 cinza frio, e os tons semânticos (bom/atenção/crítico) suavizados para não parecer alarme.
@@ -1199,13 +1207,18 @@ return '';
 // botão. Vantagem sobre a Web Speech API: nenhum áudio do paciente sai do navegador (mais forte
 // para LGPD) — só o modelo genérico (sem dado nenhum do paciente) é baixado de uma CDN pública
 // na primeira vez; depois fica em cache e funciona offline.
-// MODELO: usamos "whisper-medium" (evoluído de "tiny" → "base" → "small" → "medium" em
-// rodadas anteriores). Testes reais mostraram o tiny "alucinando" — devolvendo frases inteiras
-// sem relação com o áudio (ex.: "Ah, ja.", "Vá sobre?") — e mesmo o base/small ainda trocando
-// palavras curtas por outras parecidas (ex.: "Bolsa"→"Boça!", "Tesoura"→"Desouro."). O medium é
-// o mais preciso dos quatro, ao custo de um download inicial bem maior (a troca é: primeira
-// transcrição da sessão mais lenta até o modelo ficar em cache local — vale a pena porque
-// precisão aqui é justamente o que evita "corrigir" a fala da criança).
+// MODELO: usamos "whisper-small" (evoluído de "tiny" → "base" → "small" → chegou a testar
+// "medium" e voltou). Testes reais mostraram o tiny "alucinando" — devolvendo frases inteiras
+// sem relação com o áudio (ex.: "Ah, ja.", "Vá sobre?") — e mesmo o base ainda trocando
+// palavras curtas por outras parecidas (ex.: "Bolsa"→"Boça!", "Tesoura"→"Desouro."). O medium
+// chegou a ser adotado por ser o mais preciso, mas na prática os pesos ONNX quantizados dele
+// somam ~780MB (encoder ~313MB + decoder ~463MB, medidos direto no host da Hugging Face) — em
+// teste real isso trava o carregamento do modelo indefinidamente ("baixando modelo…" sem sair
+// do lugar) até estourar em erro, tornando a transcrição automática inutilizável na prática.
+// O small soma ~249MB (encoder ~92MB + decoder ~157MB) — ainda pesado para a primeira sessão,
+// mas dentro do que um navegador consegue baixar/carregar em WASM de forma confiável. Perde
+// alguma precisão frente ao medium, mas um modelo que carrega vale mais do que um mais preciso
+// que nunca termina de baixar.
 // PRÉ-PROCESSAMENTO DE ÁUDIO: além de trocar o modelo, o áudio agora é decodificado e recortado
 // por nós antes de ir pro Whisper — ver decodeAudioForWhisper() logo abaixo. Como o Whisper
 // sempre processa uma janela interna de 30s, uma gravação de ~2s de uma palavra só vira quase
@@ -1231,17 +1244,36 @@ return '';
 let whisperPipelinePromise = null;
 let whisperStatus = {}; // índice -> 'loading-model' | 'transcribing' | 'error' | undefined
 const WHISPER_TARGET_SR = 16000; // taxa de amostragem exigida pelo Whisper
+// Progresso do download do modelo (compartilhado — o pipeline é um singleton carregado uma vez
+// só pra sessão inteira, então esse estado não é por palavra/índice). { file, progress } do
+// arquivo .onnx mais recente reportado pelo transformers.js, ou null quando não há download em
+// andamento. Antes disso o parâmetro progress_callback existia na assinatura mas ninguém
+// passava nada pra ele — a tela ficava travada num rótulo estático ("Baixando modelo…") mesmo
+// quando o download estava avançando de verdade, o que parecia (e podia genuinamente ser) trava.
+let whisperLoadProgress = null;
 
 async function getWhisperPipeline(onProgress){
 if(!whisperPipelinePromise){
 whisperPipelinePromise = (async () => {
 const mod = await import('https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2/+esm');
-// MODELO: "whisper-medium" (acima do "small"/"base" testados antes). Mais preciso, ao custo de
-// um download inicial maior (a primeira transcrição da sessão demora mais até o modelo ficar
-// em cache local); depois disso funciona offline normalmente, como os demais.
-return await mod.pipeline('automatic-speech-recognition', 'Xenova/whisper-medium', {
+// MODELO: "whisper-small" (acima do "base"/"tiny" testados antes; "medium" foi testado e
+// revertido — ver nota de metodologia acima, ~780MB trava o carregamento no navegador).
+// Ainda demora na primeira transcrição da sessão até o modelo ficar em cache local; depois
+// disso funciona offline normalmente, como os demais.
+return await mod.pipeline('automatic-speech-recognition', 'Xenova/whisper-small', {
 quantized: true,
-progress_callback: onProgress
+progress_callback: (data) => {
+// Eventos típicos do transformers.js: {status:'progress', file, progress, loaded, total}
+// por arquivo (encoder/decoder/tokenizer/config), e status 'initiate'/'download'/'done'/
+// 'ready'. Guardamos só o mais recente pra exibir "baixando <arquivo> NN%" na UI.
+if(data && data.status === 'progress' && typeof data.progress === 'number'){
+whisperLoadProgress = { file: (data.file||'').split('/').pop(), progress: Math.round(data.progress) };
+renderWordList();
+} else if(data && (data.status === 'done' || data.status === 'ready')){
+whisperLoadProgress = null;
+}
+if(onProgress) onProgress(data);
+}
 });
 })();
 }
@@ -1396,7 +1428,11 @@ transcribeErrorNote[i] = TRANSCRIBE_EMPTY_MESSAGE;
 }catch(e){
 console.warn('Falha na transcrição automática (Whisper/transformers.js):', e);
 whisperStatus[i] = 'error';
-transcribeErrorNote[i] = TRANSCRIBE_ERROR_MESSAGE;
+whisperLoadProgress = null; // não deixa um % antigo grudado na tela numa tentativa nova
+// Mostra o motivo técnico real (e.message) junto do texto genérico, em vez de só uma lista de
+// possibilidades — "sem internet" era uma delas, mas nem sempre a certa, e sem o motivo real
+// não dá pra diferenciar timeout de memória insuficiente de erro de rede de fato.
+transcribeErrorNote[i] = TRANSCRIBE_ERROR_MESSAGE + (e && e.message ? ` (detalhe técnico: ${e.message})` : '');
 } finally {
 renderWordList();
 if(aiRun) renderResults();
@@ -1565,7 +1601,7 @@ const cardClass = audio ? 'word-card has-audio' : 'word-card';
 const recBtn = isRecording
 ? `<button class="rec-btn recording" onclick="stopRecording()"><span class="rec-dot"></span> Parar</button>`
 : `<button class="rec-btn" onclick="startRecording(${i})" ${recordingIndex!==null?'disabled':''}>🎙️ Gravar</button>`;
-const whisperBtnLabel = whisperStatus[i]==='loading-model' ? '⏳ Baixando modelo…'
+const whisperBtnLabel = whisperStatus[i]==='loading-model' ? (whisperLoadProgress ? `⏳ Baixando modelo… ${whisperLoadProgress.progress}%` : '⏳ Baixando modelo…')
 : whisperStatus[i]==='transcribing' ? '⏳ Transcrevendo…'
 : whisperStatus[i]==='error' ? '⚠️ Tentar novamente'
 : '🧠 Transcrever novamente';
@@ -1583,7 +1619,7 @@ ${whisperBtn}
 <button class="clear-audio" onclick="clearAudio(${i})">remover</button>
 </div>` : '';
 const autoBadge = autoTranscribed[i] ? ` <span class="asr-badge" title="Preenchido pela transcrição automática (Whisper local) — confira e corrija se necessário">🧠 transcrito automaticamente</span>`
-: whisperStatus[i]==='loading-model' ? ` <span class="asr-badge" title="Baixando o modelo local de transcrição (só na primeira vez)">⏳ baixando modelo…</span>`
+: whisperStatus[i]==='loading-model' ? ` <span class="asr-badge" title="Baixando o modelo local de transcrição (só na primeira vez)">⏳ baixando modelo${whisperLoadProgress ? ` (${whisperLoadProgress.file} ${whisperLoadProgress.progress}%)` : '…'}</span>`
 : whisperStatus[i]==='transcribing' ? ` <span class="asr-badge" title="Transcrição automática em andamento">⏳ transcrevendo…</span>` : '';
 const producedNow = getProducedText(i);
 // Falha da transcrição automática (Whisper local) para este áudio — ver TRANSCRIBE_ERROR_MESSAGE/
