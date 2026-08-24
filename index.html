@@ -1082,7 +1082,7 @@ const totalBytes = examples.reduce((s,e)=> s + (e.audioBlob ? e.audioBlob.size :
 const byProcess = {};
 examples.forEach(e=>{ const k = e.process || 'Nenhum'; byProcess[k] = (byProcess[k]||0)+1; });
 const processLines = Object.entries(byProcess).sort((a,b)=>b[1]-a[1])
-.map(([p,c])=> `${p}: <b>${c}</b>`).join(' · ') || '—';
+.map(([p,c])=> `${escapeAttr(p)}: <b>${c}</b>`).join(' · ') || '—';
 document.getElementById('kbStats').innerHTML = `
 Total de exemplos: <b>${examples.length}</b><br>
 Tamanho estimado de áudio: <b>${formatBytes(totalBytes)}</b><br>
@@ -1965,13 +1965,17 @@ list.innerHTML = processedIndices().map(i=>{
 const w = targetWords[i];
 const r = computeResult(i, months);
 const checked = reviewedSet.has(i) ? 'checked' : '';
-const producedDisplay = r.status==='correct' ? '<span class="cell-muted">produção compatível com o alvo</span>' : `[${r.producedRaw}]`;
+// XSS: r.producedRaw é a transcrição (digitada pelo profissional OU devolvida pelo Whisper),
+// texto livre e não confiável — precisa passar por escapeAttr() antes de entrar no innerHTML.
+// Achado num teste real: um payload tipo <img src=x onerror=...> digitado nesse campo executava
+// de verdade quando a Etapa 3 renderizava. Ver commit da correção.
+const producedDisplay = r.status==='correct' ? '<span class="cell-muted">produção compatível com o alvo</span>' : `[${escapeAttr(r.producedRaw)}]`;
 const extraNote = r.extra>0 ? ` <span class="badge badge-neutral" title="Outros desvios detectados na mesma transcrição">+${r.extra}</span>` : '';
 return `
 <div class="result-row">
 <div><div class="rw-word">${w.word}</div><div class="rw-ipa">${w.ipa || '&nbsp;'}</div></div>
 <div class="rw-ipa">${producedDisplay}${r.notacao ? ` <span class="badge badge-neutral" style="margin-left:4px;" title="Notação ABFW (transcrição)">${r.notacao}</span>` : ''}${extraNote}</div>
-<div>${r.process ? r.process : '<span class="cell-muted">—</span>'} <span class="badge badge-neutral" style="margin-left:4px;">${r.deviation}</span></div>
+<div>${r.process ? escapeAttr(r.process) : '<span class="cell-muted">—</span>'} <span class="badge badge-neutral" style="margin-left:4px;">${r.deviation}</span></div>
 <div><span class="badge ${r.badge.cls}">${r.badge.icon} ${r.badge.label}</span></div>
 <div class="review-check">
 <input type="checkbox" id="rev${i}" ${checked} onchange="toggleReview(${i})">
@@ -2076,7 +2080,7 @@ rotulo = `${n} ocorrência(s) (${Math.round(pct*100)}% dos itens avaliados) — 
 } else {
 rotulo = `${n} ocorrência(s) (${Math.round(pct*100)}% dos itens avaliados) — abaixo de 25% das oportunidades para produtividade`;
 }
-return `<div>${p}: <b>${n}×</b> — ${rotulo}</div>`;
+return `<div>${escapeAttr(p)}: <b>${n}×</b> — ${rotulo}</div>`;
 }).join('');
 }
 
