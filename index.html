@@ -1213,18 +1213,16 @@ return '';
 // botão. Vantagem sobre a Web Speech API: nenhum áudio do paciente sai do navegador (mais forte
 // para LGPD) — só o modelo genérico (sem dado nenhum do paciente) é baixado de uma CDN pública
 // na primeira vez; depois fica em cache e funciona offline.
-// MODELO: usamos "whisper-small" (evoluído de "tiny" → "base" → "small" → chegou a testar
-// "medium" e voltou). Testes reais mostraram o tiny "alucinando" — devolvendo frases inteiras
-// sem relação com o áudio (ex.: "Ah, ja.", "Vá sobre?") — e mesmo o base ainda trocando
-// palavras curtas por outras parecidas (ex.: "Bolsa"→"Boça!", "Tesoura"→"Desouro."). O medium
-// chegou a ser adotado por ser o mais preciso, mas na prática os pesos ONNX quantizados dele
-// somam ~780MB (encoder ~313MB + decoder ~463MB, medidos direto no host da Hugging Face) — em
-// teste real isso trava o carregamento do modelo indefinidamente ("baixando modelo…" sem sair
-// do lugar) até estourar em erro, tornando a transcrição automática inutilizável na prática.
-// O small soma ~249MB (encoder ~92MB + decoder ~157MB) — ainda pesado para a primeira sessão,
-// mas dentro do que um navegador consegue baixar/carregar em WASM de forma confiável. Perde
-// alguma precisão frente ao medium, mas um modelo que carrega vale mais do que um mais preciso
-// que nunca termina de baixar.
+// MODELO: usamos "whisper-base" (evoluído de "tiny" → "base" → chegou a testar "small" e
+// "medium", voltou pro base). Testes reais mostraram o tiny "alucinando" — devolvendo frases
+// inteiras sem relação com o áudio (ex.: "Ah, ja.", "Vá sobre?"). O base soma ~76MB (encoder
+// ~23MB + decoder ~54MB, medidos direto no host da Hugging Face) — baixa rápido, mas erra mais
+// em palavras curtas parecidas (ex.: "Bolsa"→"Boça!", "Tesoura"→"Desouro."; ver aviso de
+// hipótese alternativa e o de "bateu exatamente com a palavra-alvo" em renderWordList, que
+// existem justamente pra cobrir esses erros). O small (~249MB) e o medium (~780MB) são mais
+// precisos, mas download grande demais pesou mais na prática do que valeu a precisão extra —
+// ver histórico no README/commits. Se a precisão voltar a ser prioridade sobre velocidade,
+// trocar só a string do modelo abaixo (e o texto deste comentário) já resolve.
 // PRÉ-PROCESSAMENTO DE ÁUDIO: além de trocar o modelo, o áudio agora é decodificado e recortado
 // por nós antes de ir pro Whisper — ver decodeAudioForWhisper() logo abaixo. Como o Whisper
 // sempre processa uma janela interna de 30s, uma gravação de ~2s de uma palavra só vira quase
@@ -1262,11 +1260,11 @@ async function getWhisperPipeline(onProgress){
 if(!whisperPipelinePromise){
 whisperPipelinePromise = (async () => {
 const mod = await import('https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2/+esm');
-// MODELO: "whisper-small" (acima do "base"/"tiny" testados antes; "medium" foi testado e
-// revertido — ver nota de metodologia acima, ~780MB trava o carregamento no navegador).
-// Ainda demora na primeira transcrição da sessão até o modelo ficar em cache local; depois
-// disso funciona offline normalmente, como os demais.
-return await mod.pipeline('automatic-speech-recognition', 'Xenova/whisper-small', {
+// MODELO: "whisper-base" (acima do "tiny" testado antes; "small" e "medium" foram testados e
+// revertidos por tamanho de download — ver nota de metodologia acima). ~76MB, ainda demora um
+// pouco na primeira transcrição da sessão até ficar em cache local; depois disso funciona
+// offline normalmente, como os demais.
+return await mod.pipeline('automatic-speech-recognition', 'Xenova/whisper-base', {
 quantized: true,
 progress_callback: (data) => {
 // Eventos típicos do transformers.js: {status:'progress', file, progress, loaded, total}
