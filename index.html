@@ -1450,11 +1450,26 @@ const stream = await navigator.mediaDevices.getUserMedia({audio:true});
 const mimeType = pickMimeType();
 const mr = new MediaRecorder(stream, mimeType ? {mimeType} : undefined);
 const chunks = [];
+const recordStartedAt = Date.now();
 mr.ondataavailable = e => { if(e.data && e.data.size>0) chunks.push(e.data); };
 mr.onstop = () => {
 const blob = new Blob(chunks, {type: mr.mimeType || 'audio/webm'});
+const durationMs = Date.now() - recordStartedAt;
 stream.getTracks().forEach(t=>t.stop());
 activeRecorder = null; recordingIndex = null;
+// Diagnóstico sempre visível no console (não só quando algo falha depois) — tamanho do blob
+// e duração da gravação são os dois sinais mais diretos pra separar "microfone não capturou
+// nada" de "capturou, mas o Whisper/decodeAudioData não deu conta do formato".
+console.info(`Gravação finalizada (item ${i}): ${blob.size} bytes, mimeType="${mr.mimeType || '(vazio)'}", ~${durationMs}ms`);
+if(blob.size < 1000 || durationMs < 200){
+// Gravação vazia/curta demais pra conter fala real. É a causa mais provável do erro "Unable
+// to decode audio data": um contêiner de áudio praticamente sem dado, que nem o navegador
+// consegue decodificar — então nem tenta mandar pro Whisper, evita repetir o mesmo erro.
+setAudio(i, blob, 'gravado', {skipAutoTranscribe: true});
+transcribeErrorNote[i] = `A gravação ficou vazia ou curta demais (${blob.size} bytes, ~${durationMs}ms) para conter fala. Confira a permissão do microfone (ícone na barra de endereço) e tente de novo segurando "Gravar" por pelo menos meio segundo falando a palavra antes de clicar "Parar".`;
+renderWordList();
+return;
+}
 setAudio(i, blob, 'gravado');
 };
 mr.start();
@@ -1481,7 +1496,7 @@ if(!file) return;
 setAudio(i, file, 'importado');
 }
 
-function setAudio(i, blobOrFile, source){
+function setAudio(i, blobOrFile, source, opts){
 if(audioMap[i]) URL.revokeObjectURL(audioMap[i].url);
 audioMap[i] = { url: URL.createObjectURL(blobOrFile), source, blob: blobOrFile };
 knowledgeSavedSet.delete(i); // novo áudio para este item -> pode gerar um novo exemplo quando revisado
@@ -1490,8 +1505,9 @@ updateCollectProgress();
 // Dispara a transcrição automática (Whisper local) assim que há áudio REAL — gravado ou
 // importado. O áudio de demonstração (tom sintético, sem fala nenhuma) fica de fora de
 // propósito: não há nada para transcrever ali, e essa chamada só geraria um "não retornou
-// texto" sem sentido para o profissional.
-if(source==='gravado' || source==='importado') transcribeAudio(i);
+// texto" sem sentido para o profissional. skipAutoTranscribe (opts) é o mesmo caso na prática:
+// gravação vazia/curta demais (ver startRecording) — quem chamou já decidiu a mensagem certa.
+if((source==='gravado' || source==='importado') && !(opts && opts.skipAutoTranscribe)) transcribeAudio(i);
 }
 function clearAudio(i){
 if(audioMap[i]){ URL.revokeObjectURL(audioMap[i].url); delete audioMap[i]; }
