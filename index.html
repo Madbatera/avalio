@@ -3,6 +3,31 @@
 <html lang="pt-BR">
 <head>
 <meta charset="UTF-8">
+<!-- CSP de defesa em profundidade (achado da revisão de segurança). Não substitui escapar
+     texto livre nos innerHTML — isso já foi corrigido nos pontos que injetavam sem escapar
+     (ver commit) — mas limita o estrago de qualquer injeção futura que passe despercebida:
+     'unsafe-inline' em script/style é necessário porque o app usa onclick="" e style="" inline
+     em todo canto (refatorar pra addEventListener/classes é um projeto à parte, não algo pra
+     fazer escondido numa correção de segurança). O que realmente importa aqui é o connect-src
+     restrito: mesmo que um script consiga rodar, ele não consegue abrir fetch()/XHR pra um
+     host de fora desta lista — ou seja, não dá pra exfiltrar dado de paciente do IndexedDB pra
+     um servidor de atacante, mesmo que a injeção em si não seja bloqueada. 'wasm-unsafe-eval'
+     é obrigatório pro Whisper local rodar (onnxruntime-web precisa compilar WebAssembly) —
+     testado com Playwright: sem isso, a transcrição quebra por completo ("Unsupported model
+     type: whisper", achado rodando o pipeline real com esta CSP ligada antes de commitar). -->
+<meta http-equiv="Content-Security-Policy" content="
+  default-src 'self';
+  script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' blob: https://cdn.jsdelivr.net;
+  worker-src 'self' blob:;
+  style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
+  font-src https://fonts.gstatic.com;
+  img-src 'self' data:;
+  media-src 'self' blob:;
+  connect-src 'self' blob: https://cdn.jsdelivr.net https://huggingface.co https://*.hf.co;
+  object-src 'none';
+  base-uri 'none';
+  form-action 'self';
+">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <!-- O app só tem tema claro implementado (ver auditoria) — sem isto, navegador/SO em modo
      escuro força um "dark mode automático" nos elementos nativos (inputs, scrollbars, controles
@@ -1651,7 +1676,7 @@ ${whisperBtn}
 <button class="clear-audio" onclick="clearAudio(${i})">remover</button>
 </div>` : '';
 const autoBadge = autoTranscribed[i] ? ` <span class="asr-badge" title="Preenchido pela transcrição automática (Whisper local) — confira e corrija se necessário">🧠 transcrito automaticamente</span>`
-: whisperStatus[i]==='loading-model' ? ` <span class="asr-badge" title="Baixando o modelo local de transcrição (só na primeira vez)">⏳ baixando modelo${whisperLoadProgress ? ` (${whisperLoadProgress.file} ${whisperLoadProgress.progress}%)` : '…'}</span>`
+: whisperStatus[i]==='loading-model' ? ` <span class="asr-badge" title="Baixando o modelo local de transcrição (só na primeira vez)">⏳ baixando modelo${whisperLoadProgress ? ` (${escapeAttr(whisperLoadProgress.file)} ${whisperLoadProgress.progress}%)` : '…'}</span>`
 : whisperStatus[i]==='transcribing' ? ` <span class="asr-badge" title="Transcrição automática em andamento">⏳ transcrevendo…</span>` : '';
 const producedNow = getProducedText(i);
 // Falha da transcrição automática (Whisper local) para este áudio — ver TRANSCRIBE_ERROR_MESSAGE/
