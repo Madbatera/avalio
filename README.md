@@ -79,6 +79,16 @@ O projeto começou como três protótipos HTML quase idênticos
 (`Avalio_corrigido_html.html`, 19/08) foi consolidada como `index.html`;
 as duas versões anteriores permanecem disponíveis no histórico do git.
 
+Também em 2026-08-24: corrigido um comentário desatualizado que dizia
+`whisper-small` quando o modelo carregado de fato já era `whisper-medium`;
+e adicionada uma segunda passada de transcrição (com amostragem, já que a
+API de pipeline do `transformers.js@2.17.2` não expõe múltiplas hipóteses
+de beam search) para gerar uma hipótese alternativa quando a transcrição
+automática bate exatamente com a palavra-alvo — sinal de possível
+"correção" indevida da fala da criança. **Não testado ponta-a-ponta**
+(sem microfone/áudio real no ambiente onde foi implementado); validar no
+navegador antes de confiar no resultado.
+
 ## Aviso
 
 Transcrição e classificação automáticas são um apoio, não um diagnóstico.

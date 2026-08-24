@@ -1199,12 +1199,13 @@ return '';
 // botão. Vantagem sobre a Web Speech API: nenhum áudio do paciente sai do navegador (mais forte
 // para LGPD) — só o modelo genérico (sem dado nenhum do paciente) é baixado de uma CDN pública
 // na primeira vez; depois fica em cache e funciona offline.
-// MODELO: usamos "whisper-small" (evoluído de "tiny" → "base" → "small" em rodadas
-// anteriores). Testes reais mostraram o tiny "alucinando" — devolvendo frases inteiras sem
-// relação com o áudio (ex.: "Ah, ja.", "Vá sobre?") — e mesmo o base ainda trocando palavras
-// curtas por outras parecidas (ex.: "Bolsa"→"Boça!", "Tesoura"→"Desouro."). O small é mais
-// preciso ainda, ao custo de um download inicial maior (a troca é: primeira transcrição da
-// sessão mais lenta até o modelo ficar em cache local).
+// MODELO: usamos "whisper-medium" (evoluído de "tiny" → "base" → "small" → "medium" em
+// rodadas anteriores). Testes reais mostraram o tiny "alucinando" — devolvendo frases inteiras
+// sem relação com o áudio (ex.: "Ah, ja.", "Vá sobre?") — e mesmo o base/small ainda trocando
+// palavras curtas por outras parecidas (ex.: "Bolsa"→"Boça!", "Tesoura"→"Desouro."). O medium é
+// o mais preciso dos quatro, ao custo de um download inicial bem maior (a troca é: primeira
+// transcrição da sessão mais lenta até o modelo ficar em cache local — vale a pena porque
+// precisão aqui é justamente o que evita "corrigir" a fala da criança).
 // PRÉ-PROCESSAMENTO DE ÁUDIO: além de trocar o modelo, o áudio agora é decodificado e recortado
 // por nós antes de ir pro Whisper — ver decodeAudioForWhisper() logo abaixo. Como o Whisper
 // sempre processa uma janela interna de 30s, uma gravação de ~2s de uma palavra só vira quase
@@ -1235,8 +1236,8 @@ async function getWhisperPipeline(onProgress){
 if(!whisperPipelinePromise){
 whisperPipelinePromise = (async () => {
 const mod = await import('https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2/+esm');
-// MODELO: "whisper-small" (acima do "base" testado antes). Mais preciso, ao custo de um
-// download inicial maior (a primeira transcrição da sessão demora mais até o modelo ficar
+// MODELO: "whisper-medium" (acima do "small"/"base" testados antes). Mais preciso, ao custo de
+// um download inicial maior (a primeira transcrição da sessão demora mais até o modelo ficar
 // em cache local); depois disso funciona offline normalmente, como os demais.
 return await mod.pipeline('automatic-speech-recognition', 'Xenova/whisper-medium', {
 quantized: true,
@@ -1351,9 +1352,44 @@ initial_prompt: '' // evita viés de contexto de frase anterior inexistente
 });
 const text = (result && result.text ? result.text : '').trim();
 delete whisperStatus[i];
+delete producedAlternatives[i];
 if(text){
 producedText[i] = text;
 autoTranscribed[i] = true;
+// Segunda leitura, só quando a transcrição bate EXATAMENTE com a palavra-alvo: é justamente
+// o cenário em que o modelo pode ter "corrigido" um desvio real da criança de volta pra
+// forma-dicionário (ver nota de metodologia acima e o aviso correspondente em
+// renderWordList). Confirmado lendo o código-fonte do transformers.js@2.17.2: a pipeline de
+// ASR SEMPRE colapsa a decodificação numa única hipótese, mesmo passando num_beams/
+// num_return_sequences>1 (limitação da própria lib, não é bug nosso) — então não dá pra
+// pedir um "top-3" de beam search por essa API. Em vez disso, fazemos UMA segunda passada
+// com amostragem (do_sample+temperature>0, ao invés de greedy): se o modelo "hesitar" entre
+// a palavra-alvo e outra leitura, essa segunda passada tem chance real de divergir da
+// primeira e expor essa hesitação como hipótese alternativa clicável (ver alternatives/
+// altChips em renderWordList). Só roda nesse cenário específico, pra não pagar o custo extra
+// nos casos que já não são suspeitos. NÃO TESTADO ponta-a-ponta neste ambiente de
+// desenvolvimento (sem microfone/áudio real aqui) — validar no navegador antes de confiar.
+const targetWord = (targetWords[i] && targetWords[i].word || '').trim().toLowerCase();
+if(targetWord && text.toLowerCase() === targetWord){
+try{
+const altResult = await transcriber(asrInput, {
+language: 'portuguese',
+task: 'transcribe',
+do_sample: true,
+temperature: 0.6,
+condition_on_previous_text: false,
+no_repeat_ngram_size: 3,
+initial_prompt: ''
+});
+const altText = (altResult && altResult.text ? altResult.text : '').trim();
+if(altText && altText.toLowerCase() !== text.toLowerCase()){
+producedAlternatives[i] = [altText];
+}
+}catch(altErr){
+// Falha na segunda passada não deve derrubar a transcrição principal, que já ficou boa.
+console.warn('Não foi possível gerar hipótese alternativa de transcrição:', altErr);
+}
+}
 } else {
 transcribeErrorNote[i] = TRANSCRIBE_EMPTY_MESSAGE;
 }
