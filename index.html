@@ -218,7 +218,13 @@ border-radius:var(--radius); padding:13px 16px; font-size:12.6px; color:var(--br
 .rec-btn:disabled{ opacity:.5; cursor:not-allowed; }
 @keyframes pulse{ 0%,100%{opacity:1;} 50%{opacity:.25;} }
 .import-btn{ font-size:11.3px; font-weight:700; padding:5px 9px; border-radius:var(--radius-pill); border:1px solid var(--border); background:var(--surface-1); cursor:pointer; white-space:nowrap; }
-.word-audio{ flex-basis:100%; display:flex; align-items:center; gap:8px; margin-top:6px; }
+/* min-width:0 aqui (não só no <audio> filho) é o que impede o card de vazar pra fora do grid:
+sem isto, .word-audio (item flex de .word-card) recusa encolher abaixo do conteúdo mínimo dos
+FILHOS não-encolhíveis (badge da origem + botão remover, ~200px) somado à largura natural do
+<audio> — e isso persiste em praticamente toda largura de janela com 2 colunas (~900–1360px),
+não só em mobile. Achado rodando Playwright em várias larguras e medindo scrollWidth real; só
+existia dentro da media query mobile (≤768px), por isso funcionava estreito e vazava no meio. */
+.word-audio{ flex-basis:100%; display:flex; align-items:center; gap:8px; margin-top:6px; min-width:0; }
 .word-audio audio{ height:30px; flex:1; min-width:0; }
 .word-transcription{ flex-basis:100%; margin-top:6px; }
 .word-transcription label{ font-size:10.3px; color:var(--text-muted); display:block; margin-bottom:3px; }
