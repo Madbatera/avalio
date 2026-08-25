@@ -2,6 +2,10 @@
 .DS_Store
 Thumbs.db
 
+## Configurações locais de ferramentas de IA (não fazem parte do projeto)
+/.claude/
+/.codex/
+
 ## Materiais de referência com direitos autorais (não versionar)
 /referencias/
 
