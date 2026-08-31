@@ -1321,7 +1321,8 @@ return whisperPipelinePromise;
 // antes/depois da fala: como o Whisper sempre processa uma janela interna de 30s, uma gravação
 // de ~2s vira quase toda silêncio "de enchimento", e é justamente esse excesso de silêncio a
 // causa mais documentada de o modelo "alucinar" ou distorcer palavras curtas. Reduzir esse
-// silêncio ao mínimo (mantendo uma margem pequena) ataca essa causa diretamente.
+// silêncio ao mínimo (mantendo uma margem — ver nota sobre o valor dela logo abaixo, no cálculo
+// de `pad`) ataca essa causa diretamente.
 async function decodeAudioForWhisper(blob){
 const arrayBuffer = await blob.arrayBuffer();
 const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
@@ -1372,7 +1373,15 @@ lastVoiced = end;
 }
 }
 if(firstVoiced === -1) return new Float32Array(0); // nenhuma fala detectada
-const pad = Math.round(WHISPER_TARGET_SR * 0.35); // margem maior para nao cortar inicio/fim da palavra
+// MARGEM: era 0.35s — achado real testando no Safari (WebKit) com microfone de verdade: um corte
+// de só ~90ms na cauda de "Galinha" (a palavra inteira tinha 1.48s) foi o suficiente pra virar a
+// transcrição de "Galinha." pra "[Música]"/"Lá lhe é." — o modelo é sensível o bastante a perder um
+// pedacinho do fim/início da palavra pra trocar de hipótese inteira. Confirmado ao vivo: usando o
+// áudio reamostrado SEM nenhum corte, a mesma gravação transcreve certo; aumentando a margem pra
+// 0.8s (o suficiente pra essa gravação de 1.48s não cortar nada), volta a transcrever certo. Dobrar
+// a margem custa pouco (só reduz um pouco o corte de silêncio de enchimento em gravações com MUITO
+// silêncio sobrando) e evita esse tipo de corte fino demais que comeu conteúdo real da palavra.
+const pad = Math.round(WHISPER_TARGET_SR * 0.8);
 const from = Math.max(0, firstVoiced - pad);
 const to = Math.min(mono.length, lastVoiced + pad);
 return mono.slice(from, to);
