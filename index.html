@@ -934,6 +934,11 @@ let audioMap = {}; // índice -> { url, source: 'gravado'|'importado'|'demo' }
 let producedText = {}; // índice -> transcrição editável (o que a IA "ouviu" ou o que foi digitado)
 let autoTranscribed = {}; // índice -> true quando o texto veio do reconhecimento de fala automático (ainda não editado à mão)
 let producedAlternatives = {}; // índice -> outras hipóteses de transcrição, quando o motor oferece mais de uma
+// índice -> frase bruta que o Whisper devolveu quando ela tinha 2+ palavras (protocolo é
+// nomeação de UMA palavra só) — producedText[i] já fica só com a primeira "palavra" (ver
+// toIsolatedWord em transcribeAudio); isto guarda a frase completa só pra alimentar o aviso de
+// alucinação em renderWordList, já que o campo em si nunca mais mostra a frase inteira.
+let transcriptionRawPhrase = {};
 // índice -> mensagem de erro pronta para exibir quando a transcrição automática (Whisper local)
 // falha para esta gravação/importação — ver TRANSCRIBE_ERROR_MESSAGE e transcribeAudio().
 let transcribeErrorNote = {};
@@ -1415,8 +1420,18 @@ const text = (result && result.text ? result.text : '').trim();
 delete whisperStatus[i];
 delete producedAlternatives[i];
 if(text){
-producedText[i] = text;
+// A tarefa é sempre nomear UMA palavra isolada — quando o modelo devolve uma frase inteira
+// (alucinação clássica em áudio curto/isolado, ver LIMITAÇÃO IMPORTANTE acima), a frase toda
+// nunca correspondia à produção real de qualquer jeito, então só a primeira "palavra" (sem
+// pontuação) é aceita no campo. A frase bruta fica guardada em transcriptionRawPhrase pra
+// alimentar o aviso de alucinação em renderWordList — ela não desaparece, só não fica mais
+// no campo de transcrição, que agora sempre fica no formato de palavra isolada pedido.
+const textWordCount = text.split(/\s+/).filter(Boolean).length;
+const wasPhrase = textWordCount >= 2 && !isRepeatedSingleWord(text);
+const isolatedWord = toIsolatedWord(text);
+producedText[i] = isolatedWord;
 autoTranscribed[i] = true;
+transcriptionRawPhrase[i] = wasPhrase ? text : undefined;
 // Segunda leitura, só nos dois cenários em que a primeira transcrição é suspeita:
 // 1) bate EXATAMENTE com a palavra-alvo — o modelo pode ter "corrigido" um desvio real da
 //    criança de volta pra forma-dicionário (ver nota de metodologia acima).
@@ -1433,9 +1448,8 @@ autoTranscribed[i] = true;
 // renderWordList). Só roda nesses dois cenários, pra não pagar o custo extra à toa. Testado
 // ponta-a-ponta com Playwright + microfone simulado (voz sintetizada via TTS) — ver commits.
 const targetWord = (targetWords[i] && targetWords[i].word || '').trim().toLowerCase();
-const textWordCount = text.split(/\s+/).filter(Boolean).length;
-const suspiciousMatch = targetWord && text.toLowerCase() === targetWord;
-const suspiciousHallucination = textWordCount >= 2 && !isRepeatedSingleWord(text);
+const suspiciousMatch = targetWord && isolatedWord.toLowerCase() === targetWord;
+const suspiciousHallucination = wasPhrase;
 if(suspiciousMatch || suspiciousHallucination){
 try{
 const altResult = await transcriber(asrInput, {
@@ -1448,8 +1462,9 @@ no_repeat_ngram_size: 3,
 initial_prompt: ''
 });
 const altText = (altResult && altResult.text ? altResult.text : '').trim();
-if(altText && altText.toLowerCase() !== text.toLowerCase()){
-producedAlternatives[i] = [altText];
+const altIsolatedWord = toIsolatedWord(altText);
+if(altIsolatedWord && altIsolatedWord.toLowerCase() !== isolatedWord.toLowerCase()){
+producedAlternatives[i] = [altIsolatedWord];
 }
 }catch(altErr){
 // Falha na segunda passada não deve derrubar a transcrição principal, que já ficou boa.
@@ -1690,6 +1705,7 @@ delete transcribeErrorNote[i];
 // junto, senão o profissional pode analisar uma transcrição que não corresponde a gravação
 // nenhuma.
 delete producedText[i];
+delete transcriptionRawPhrase[i];
 // Mesmo raciocínio da leitura fonética bruta (segundo motor, opcional): também é derivada
 // do áudio, também fica órfã se não for limpa junto.
 delete phonemeStatus[i];
@@ -1764,6 +1780,13 @@ function hasTooFewLetters(text){
 const letters = (text||'').match(/[A-Za-zÀ-ÖØ-öø-ÿ]/g) || [];
 return letters.length>0 && letters.length<3;
 }
+// A tarefa do protocolo é sempre nomear UMA palavra — usado em transcribeAudio pra reduzir uma
+// frase inteira devolvida pelo modelo (ver LIMITAÇÃO IMPORTANTE acima) à primeira "palavra",
+// sem pontuação de borda. Pedido explícito: o campo de transcrição nunca deve virar frase.
+function toIsolatedWord(text){
+const words = (text||'').trim().split(/\s+/).filter(Boolean);
+return (words[0]||'').replace(/^[.,!?;:"'()]+|[.,!?;:"'()]+$/g,'');
+}
 function getProducedText(i){
 if(producedText[i] !== undefined) return producedText[i];
 // Pedido explícito: o campo vem VAZIO por padrão — só recebe conteúdo depois de uma
@@ -1787,6 +1810,7 @@ delete manualOverride[i]; // uma nova transcrição substitui um ajuste manual a
 delete autoTranscribed[i]; // edição manual assume prioridade sobre o rótulo "transcrito automaticamente"
 delete producedAlternatives[i]; // as hipóteses do reconhecedor não valem mais após edição manual
 delete transcribeErrorNote[i]; // texto digitado à mão resolve qualquer aviso de falha da transcrição automática
+delete transcriptionRawPhrase[i]; // a frase bruta que motivou o aviso não se aplica mais a um texto digitado à mão
 knowledgeSavedSet.delete(i); // transcrição mudou: se o item for reconfirmado, deve gerar/atualizar o exemplo salvo
 if(aiRun) renderResults();
 }
@@ -1796,6 +1820,7 @@ function applyAlternativeTranscription(i, val){
 producedText[i] = val;
 delete manualOverride[i];
 delete transcribeErrorNote[i];
+delete transcriptionRawPhrase[i]; // a hipótese aplicada agora é a produção ativa, não a frase que tinha sido flagrada
 knowledgeSavedSet.delete(i);
 renderWordList();
 if(aiRun) renderResults();
@@ -1865,23 +1890,23 @@ const alternatives = producedAlternatives[i] || [];
 const matchWarning = matchesTarget ? `
 <div class="asr-match-warning">⚠️ A transcrição automática devolveu exatamente a palavra-alvo — reconhecedores genéricos tendem a "corrigir" produções com desvio para a palavra certa. Ouça o áudio e confira se foi mesmo isso que a criança falou; edite o campo se não foi.${alternatives.length ? ' Outras hipóteses abaixo.' : ''}</div>` : '';
 // Whisper (mesmo o "base") tende a "alucinar" — inventar uma frase inteira sem relação com o
-// áudio — quando a gravação é muito curta/isolada (uma palavra só). Um sinal prático disso é o
-// texto devolvido ter mais palavras do que uma única produção infantil plausível teria. Não dá
-// pra detectar alucinação com certeza sem ouvir o áudio, mas sinalizar esse caso evita que uma
-// frase inventada passe despercebida pela revisão.
-// LIMIAR: era >=4 palavras, mas em teste real com whisper-base uma alucinação de só 2 palavras
-// ("Cadê ainda?" pra "Cadeira") passou batida por esse limiar — o protocolo é nomeação de UMA
-// palavra só (ver título da tarefa), então qualquer coisa além de 1-2 palavras já é suspeita.
-// Baixado pra >=2 pra pegar esse caso; ainda deixa passar repetição simples de 1 palavra
-// (ex.: "tesoura tesoura", conta 2 mas não é uma frase inventada) sem marcar como alucinação.
-const wordCount = producedNow.trim() ? producedNow.trim().split(/\s+/).length : 0;
+// áudio — quando a gravação é muito curta/isolada (uma palavra só). Não dá pra detectar
+// alucinação com certeza sem ouvir o áudio, mas sinalizar esse caso evita que uma frase
+// inventada passe despercebida pela revisão.
+// producedNow em si NUNCA mais tem 2+ palavras quando vem do reconhecimento automático — a
+// tarefa é nomear uma palavra isolada, então transcribeAudio já reduz qualquer frase devolvida
+// pelo modelo à primeira palavra (ver toIsolatedWord). transcriptionRawPhrase[i] é onde a frase
+// completa original fica guardada só pra alimentar este aviso, já que o campo em si não a
+// mostra mais. Achado real que motivou isto: "cadeira" virou "Cadê ainda?" e antes não havia
+// nem aviso nem forma de saber que a "produção" salva era uma frase inventada, não uma palavra.
+const rawPhrase = transcriptionRawPhrase[i];
 const foreignScript = looksLikeForeignScript(producedNow);
 const tooFewLetters = hasTooFewLetters(producedNow);
-const possiblyHallucinated = autoTranscribed[i] && !matchesTarget && !isRepeatedSingleWord(producedNow)
-&& (wordCount>=2 || foreignScript || tooFewLetters);
-const hallucinationReason = foreignScript ? 'o texto tem caracteres fora do português'
+const possiblyHallucinated = autoTranscribed[i] && !matchesTarget && (!!rawPhrase || foreignScript || tooFewLetters);
+const hallucinationReason = rawPhrase ? `o modelo devolveu a frase "${escapeAttr(rawPhrase)}" para o que deveria ser uma única palavra — o campo acima já mostra só a primeira, "${escapeAttr(producedNow)}"`
+: foreignScript ? 'o texto tem caracteres fora do português'
 : tooFewLetters ? 'o texto tem letras de menos para ser uma palavra'
-: `o texto transcrito tem ${wordCount} palavras para o que deveria ser uma única palavra`;
+: '';
 const hallucinationWarning = possiblyHallucinated ? `
 <div class="asr-match-warning">⚠️ ${hallucinationReason.charAt(0).toUpperCase()}${hallucinationReason.slice(1)} — pode ser uma "alucinação" do modelo (ele inventa algo sem relação com o áudio quando a gravação é muito curta/isolada). Ouça a gravação e confira com atenção antes de confiar neste resultado.</div>` : '';
 const altChips = alternatives.length ? `
