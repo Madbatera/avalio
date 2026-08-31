@@ -1473,12 +1473,29 @@ if(aiRun) renderResults();
 }
 }
 
+// Tempo máximo de uma gravação — trava de segurança (ver nota abaixo sobre recordingIndex),
+// não uma limitação de UX: nenhuma palavra do protocolo deveria levar perto disso pra falar.
+const MAX_RECORDING_MS = 15000;
 async function startRecording(i){
 if(recordingIndex !== null) return;
 if(!micSupported()){
 document.getElementById('micGlobalWarning').style.display='flex';
 return;
 }
+// Marca recordingIndex ANTES do await getUserMedia (não depois que a Promise resolve). Sem
+// isso havia uma janela — do clique até o navegador liberar o microfone — em que um segundo
+// clique no mesmo botão (duplo clique, ou o profissional clicando de novo por achar que não
+// registrou o primeiro) reentrava em startRecording enquanto recordingIndex ainda era null,
+// disparando um SEGUNDO getUserMedia/MediaRecorder concorrente para o mesmo item. Quando as
+// duas chamadas resolviam, a última a terminar "vencia" a referência global (activeRecorder/
+// recordingIndex), deixando a outra gravação órfã — presa, sem nunca chamar stop() — e o
+// onstop tardio dela podia zerar recordingIndex/activeRecorder por baixo de uma gravação
+// diferente já em andamento. Resultado prático: o botão "Gravar" de todas as palavras
+// seguintes ficava desabilitado (recordingIndex!==null) sem nunca mais se recuperar sozinho —
+// o relato de "trava a partir de tal palavra e não volta". Reservar o slot já aqui fecha essa
+// janela de corrida; qualquer falha abaixo libera o slot de volta (recordingIndex = null).
+recordingIndex = i;
+renderWordList();
 try{
 const stream = await navigator.mediaDevices.getUserMedia({audio:true});
 const mimeType = pickMimeType();
@@ -1487,6 +1504,7 @@ const chunks = [];
 const recordStartedAt = Date.now();
 mr.ondataavailable = e => { if(e.data && e.data.size>0) chunks.push(e.data); };
 mr.onstop = () => {
+clearTimeout(safetyTimer);
 const blob = new Blob(chunks, {type: mr.mimeType || 'audio/webm'});
 const durationMs = Date.now() - recordStartedAt;
 stream.getTracks().forEach(t=>t.stop());
@@ -1508,10 +1526,15 @@ setAudio(i, blob, 'gravado');
 };
 mr.start();
 activeRecorder = mr;
-recordingIndex = i;
 renderWordList();
+// Segunda rede de segurança, independente da causa: se por qualquer motivo o profissional
+// esquecer de clicar "Parar" (ou o clique não registrar), a gravação some sozinha depois de
+// MAX_RECORDING_MS em vez de deixar recordingIndex preso indefinidamente e travar o app.
+const safetyTimer = setTimeout(()=>{ if(activeRecorder===mr && mr.state!=='inactive') mr.stop(); }, MAX_RECORDING_MS);
 }catch(err){
 console.warn('Não foi possível acessar o microfone:', err);
+recordingIndex = null;
+renderWordList();
 document.getElementById('micGlobalWarning').style.display='flex';
 }
 }
@@ -1603,6 +1626,21 @@ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace
 function isRepeatedSingleWord(text){
 const parts = (text||'').trim().toLowerCase().split(/\s+/).filter(Boolean);
 return parts.length>1 && parts.every(p=>p===parts[0]);
+}
+// Sinais de alucinação que NÃO dependem de a frase ter 2+ palavras (ver possiblyHallucinated em
+// renderWordList) — achados testando o pipeline com áudio sintetizado (voz PT-BR real, TTS) para
+// as 34 palavras-alvo: "Cama" devolveu "更慢." (chinês) e "Peixe" devolveu "PC", ambos uma única
+// "palavra" para o contador de possiblyHallucinated, então passavam pelo aviso sem serem pegos.
+// - script estranho: a tarefa é nomeação em português — qualquer caractere fora do alfabeto latino
+//   (CJK, cirílico etc.) numa transcrição não é uma produção infantil real, é o modelo divagando.
+// - texto curto demais: nenhuma palavra-alvo do protocolo tem menos de 3 letras: um resultado com
+//   1-2 letras (ex. "PC") não é uma tentativa plausível de pronunciar a palavra pedida.
+function looksLikeForeignScript(text){
+return /[^\sA-Za-zÀ-ÖØ-öø-ÿ0-9.,!?;:'"()-]/.test(text||'');
+}
+function hasTooFewLetters(text){
+const letters = (text||'').match(/[A-Za-zÀ-ÖØ-öø-ÿ]/g) || [];
+return letters.length>0 && letters.length<3;
 }
 function getProducedText(i){
 if(producedText[i] !== undefined) return producedText[i];
@@ -1704,9 +1742,15 @@ const matchWarning = matchesTarget ? `
 // Baixado pra >=2 pra pegar esse caso; ainda deixa passar repetição simples de 1 palavra
 // (ex.: "tesoura tesoura", conta 2 mas não é uma frase inventada) sem marcar como alucinação.
 const wordCount = producedNow.trim() ? producedNow.trim().split(/\s+/).length : 0;
-const possiblyHallucinated = autoTranscribed[i] && !matchesTarget && wordCount>=2 && !isRepeatedSingleWord(producedNow);
+const foreignScript = looksLikeForeignScript(producedNow);
+const tooFewLetters = hasTooFewLetters(producedNow);
+const possiblyHallucinated = autoTranscribed[i] && !matchesTarget && !isRepeatedSingleWord(producedNow)
+&& (wordCount>=2 || foreignScript || tooFewLetters);
+const hallucinationReason = foreignScript ? 'o texto tem caracteres fora do português'
+: tooFewLetters ? 'o texto tem letras de menos para ser uma palavra'
+: `o texto transcrito tem ${wordCount} palavras para o que deveria ser uma única palavra`;
 const hallucinationWarning = possiblyHallucinated ? `
-<div class="asr-match-warning">⚠️ O texto transcrito tem ${wordCount} palavras para o que deveria ser uma única palavra — pode ser uma "alucinação" do modelo (ele inventa uma frase quando o áudio é muito curto). Ouça a gravação e confira com atenção antes de confiar neste resultado.</div>` : '';
+<div class="asr-match-warning">⚠️ ${hallucinationReason.charAt(0).toUpperCase()}${hallucinationReason.slice(1)} — pode ser uma "alucinação" do modelo (ele inventa algo sem relação com o áudio quando a gravação é muito curta/isolada). Ouça a gravação e confira com atenção antes de confiar neste resultado.</div>` : '';
 const altChips = alternatives.length ? `
 <div class="asr-alt-row">
 <span class="asr-alt-label">outras hipóteses:</span>
