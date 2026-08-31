@@ -1572,6 +1572,12 @@ delete autoTranscribed[i];
 delete whisperStatus[i];
 delete producedAlternatives[i];
 delete transcribeErrorNote[i];
+// Faltava isto: sem apagar producedText[i], a transcrição de um áudio já removido ficava
+// "órfã" no campo — parecendo uma produção real revisada/confirmada quando na verdade
+// ninguém tinha mais nenhum áudio associado a ela. Remover o áudio precisa limpar o texto
+// junto, senão o profissional pode analisar uma transcrição que não corresponde a gravação
+// nenhuma.
+delete producedText[i];
 renderWordList();
 updateCollectProgress();
 }
