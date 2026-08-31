@@ -1473,6 +1473,118 @@ if(aiRun) renderResults();
 }
 }
 
+/* ================= Leitura fonética bruta (segundo motor, opcional) =================
+Pedido explícito do profissional: a transcrição precisa ser fiel à FONÉTICA da produção
+oral, não à ortografia do português — é a partir dela que a análise de processos
+fonológicos esperados/não-esperados faz sentido. O Whisper acima é um modelo de
+linguagem: ele foi treinado pra devolver palavras REAIS, então tende a "corrigir" um
+desvio de volta pra forma-dicionário (ver LIMITAÇÃO IMPORTANTE no comentário do Whisper
+e o aviso de "bateu exatamente com a palavra-alvo" em renderWordList) — o oposto do que
+se precisa aqui.
+Este segundo motor NÃO tenta formar palavras: é um reconhecedor de FONEMAS (CTC puro,
+wav2vec2-lv-60-espeak-cv-ft, treinado em ~30 idiomas contra o inventário fonético do
+espeak-ng) que devolve a sequência de sons que ele "ouviu", sem nenhum viés de
+dicionário. Não substitui a transcrição nem entra na análise automática (o motor de
+processos fonológicos abaixo continua comparando a transcrição editável de sempre) —
+é só uma segunda referência pro profissional revisar ao lado, exatamente pra flagrar
+quando o Whisper "corrigiu demais".
+Por que não usar o pipeline() de automatic-speech-recognition do transformers.js como
+pro Whisper: a conversão ONNX pronta deste modelo (onnx-community/wav2vec2-lv-60-espeak-
+cv-ft-ONNX) não publica um tokenizer.json, e o pipeline() depende dele — dá 404 e quebra
+o carregamento. A saída (id de fonema por vocab.json) é simples o bastante pra decodificar
+à mão (CTC greedy: argmax por frame, colapsar repetições, remover o token de padding/blank
+[id 0]) sem depender do tokenizer — por isso este motor roda onnxruntime-web diretamente,
+independente do transformers.js/Whisper acima.
+CUSTO: o modelo quantizado tem ~318MB (bem mais que os ~76MB do Whisper-base) — download
+grande demais pra baixar sozinho a cada carregamento da página. Por isso é opt-in: só
+baixa quando o profissional clica em "🔤 Ler fonemas" pela primeira vez; depois fica em
+cache do navegador (Cache-Control da CDN) e serve as próximas palavras da mesma sessão
+sem baixar de novo.
+QUALIDADE: testado com voz sintetizada (TTS) nas 34 palavras-alvo do protocolo — captura
+bem a fonética na maioria dos casos (ex.: "Peixe" → "p i s i", "Navio" → "n ɐ v i"), mas
+também "alucina" às vezes, de um jeito diferente do Whisper: em vez de inventar frase,
+solta tokens de tom de mandarim que nunca deveriam aparecer em português (ex.: "i5",
+"ɑu5", "s.") — sinal prático de leitura pouco confiável pra sinalizar ao profissional,
+ver possiblyGarbledPhonemes abaixo. Nunca testado com fala infantil real. */
+const PHONEME_MODEL_URL = 'https://huggingface.co/onnx-community/wav2vec2-lv-60-espeak-cv-ft-ONNX/resolve/main/onnx/model_quantized.onnx';
+const PHONEME_VOCAB_URL = 'https://huggingface.co/onnx-community/wav2vec2-lv-60-espeak-cv-ft-ONNX/resolve/main/vocab.json';
+const ORT_SCRIPT_URL = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/ort.min.js';
+let phonemeSessionPromise = null;
+let phonemeStatus = {}; // índice -> 'loading-model' | 'running' | 'error' | undefined
+let phoneticReading = {}; // índice -> string de fonemas (ex.: "p i s i") já decodificada
+function loadOrtScript(){
+return new Promise((resolve, reject) => {
+if(window.ort){ resolve(window.ort); return; }
+const s = document.createElement('script');
+s.src = ORT_SCRIPT_URL;
+s.onload = () => resolve(window.ort);
+s.onerror = () => reject(new Error('Não foi possível carregar onnxruntime-web'));
+document.head.appendChild(s);
+});
+}
+async function getPhonemeSession(){
+if(!phonemeSessionPromise){
+phonemeSessionPromise = (async () => {
+const ort = await loadOrtScript();
+ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.19.2/dist/';
+const vocab = await (await fetch(PHONEME_VOCAB_URL)).json();
+const id2tok = [];
+for(const [tok, id] of Object.entries(vocab)) id2tok[id] = tok;
+const session = await ort.InferenceSession.create(PHONEME_MODEL_URL, {executionProviders:['wasm']});
+return { ort, session, id2tok };
+})().catch(e => { phonemeSessionPromise = null; throw e; }); // falha não fica "presa" pra sempre — próxima tentativa baixa de novo
+}
+return phonemeSessionPromise;
+}
+// Ver nota QUALIDADE acima — este reconhecedor foi treinado num vocabulário multilíngue que
+// inclui unidades de tom do mandarim (sufixo numérico, ex. "i5"/"ɑu5") e alguns marcadores
+// (ex. "??", "s.") que nunca deveriam aparecer numa leitura de português — sinal prático de
+// baixa confiança nesta leitura específica, análogo ao possiblyHallucinated do Whisper.
+function possiblyGarbledPhonemes(phones){
+return /\d|\?\?|\.\s|\.$/.test(phones||'');
+}
+async function transcribePhonemes(i){
+const audio = audioMap[i];
+if(!audio || phonemeStatus[i]) return;
+phonemeStatus[i] = 'loading-model';
+renderWordList();
+try{
+const { ort, session, id2tok } = await getPhonemeSession();
+phonemeStatus[i] = 'running';
+renderWordList();
+const pcm = await decodeAudioForWhisper(audio.blob); // reaproveita o mesmo recorte de silêncio
+if(pcm.length === 0){ delete phonemeStatus[i]; renderWordList(); return; }
+// Wav2Vec2FeatureExtractor: normalização zero-média/variância-unitária sobre o clipe inteiro.
+let mean = 0; for(let k=0;k<pcm.length;k++) mean += pcm[k]; mean /= pcm.length;
+let variance = 0; for(let k=0;k<pcm.length;k++) variance += (pcm[k]-mean)**2; variance /= pcm.length;
+const std = Math.sqrt(variance + 1e-7);
+const normed = new Float32Array(pcm.length);
+for(let k=0;k<pcm.length;k++) normed[k] = (pcm[k]-mean)/std;
+const results = await session.run({ input_values: new ort.Tensor('float32', normed, [1, normed.length]) });
+const logits = results.logits;
+const [, T, V] = logits.dims;
+const data = logits.data;
+const ids = [];
+for(let t=0;t<T;t++){
+let best = -Infinity, bestIdx = 0;
+const off = t*V;
+for(let v=0;v<V;v++){ const val = data[off+v]; if(val>best){ best=val; bestIdx=v; } }
+ids.push(bestIdx);
+}
+// Decodificação CTC greedy: colapsa repetições consecutivas, depois remove o blank (id 0).
+const collapsed = [];
+for(let k=0;k<ids.length;k++){ if(k>0 && ids[k]===ids[k-1]) continue; collapsed.push(ids[k]); }
+const phones = collapsed.filter(id=>id!==0).map(id=>id2tok[id] || `<${id}>`);
+phoneticReading[i] = phones.join(' ');
+delete phonemeStatus[i];
+}catch(e){
+console.warn('Falha na leitura fonética bruta:', e);
+phonemeStatus[i] = 'error';
+}finally{
+renderWordList();
+}
+}
+
 // Tempo máximo de uma gravação — trava de segurança (ver nota abaixo sobre recordingIndex),
 // não uma limitação de UX: nenhuma palavra do protocolo deveria levar perto disso pra falar.
 const MAX_RECORDING_MS = 15000;
@@ -1578,6 +1690,10 @@ delete transcribeErrorNote[i];
 // junto, senão o profissional pode analisar uma transcrição que não corresponde a gravação
 // nenhuma.
 delete producedText[i];
+// Mesmo raciocínio da leitura fonética bruta (segundo motor, opcional): também é derivada
+// do áudio, também fica órfã se não for limpa junto.
+delete phonemeStatus[i];
+delete phoneticReading[i];
 renderWordList();
 updateCollectProgress();
 }
@@ -1712,11 +1828,22 @@ const whisperBtnLabel = whisperStatus[i]==='loading-model' ? (whisperLoadProgres
 // sem precisar regravar/reimportar o áudio.
 const whisperBtn = (audio && audio.source!=='demo') ? `
 <button class="whisper-btn" id="whisperBtn_${i}" onclick="transcribeAudio(${i})" ${(whisperStatus[i] && whisperStatus[i]!=='error')?'disabled':''} title="Roda um modelo Whisper local no navegador — nenhum áudio é enviado a servidor">${whisperBtnLabel}</button>` : '';
+// Segundo motor, opcional (ver nota "Leitura fonética bruta" acima): reconhece FONEMAS crus, sem
+// corrigir pra palavra do dicionário — ao contrário do botão de transcrição acima, não roda
+// sozinho (o modelo tem ~318MB, só baixa quando o profissional pede explicitamente).
+const phonemeBtnLabel = phonemeStatus[i]==='loading-model' ? '⏳ Baixando modelo de fonemas (~318MB)…'
+: phonemeStatus[i]==='running' ? '⏳ Lendo fonemas…'
+: phonemeStatus[i]==='error' ? '⚠️ Tentar de novo'
+: phoneticReading[i] ? '🔤 Ler fonemas de novo'
+: '🔤 Ler fonemas (bruto)';
+const phonemeBtn = (audio && audio.source!=='demo') ? `
+<button class="whisper-btn" onclick="transcribePhonemes(${i})" ${phonemeStatus[i]?'disabled':''} title="Segundo motor: reconhece os fonemas ouvidos sem corrigir pra palavra do dicionário — referência adicional, não substitui a transcrição nem entra na análise automática. Baixa um modelo de ~318MB na primeira vez.">${phonemeBtnLabel}</button>` : '';
 const audioRow = audio ? `
 <div class="word-audio">
 <audio controls src="${audio.url}"></audio>
 <span class="badge badge-neutral" style="flex:none;">${sourceLabel[audio.source]||audio.source}</span>
 ${whisperBtn}
+${phonemeBtn}
 <button class="clear-audio" onclick="clearAudio(${i})">remover</button>
 </div>` : '';
 const autoBadge = autoTranscribed[i] ? ` <span class="asr-badge" title="Preenchido pela transcrição automática (Whisper local) — confira e corrija se necessário">🧠 transcrito automaticamente</span>`
@@ -1762,10 +1889,17 @@ const altChips = alternatives.length ? `
 <span class="asr-alt-label">outras hipóteses:</span>
 ${alternatives.map(a=>`<button type="button" class="asr-alt-chip" data-alt="${escapeAttr(a)}" onclick="applyAlternativeTranscription(${i}, this.dataset.alt)" title="Usar esta hipótese como transcrição">${escapeAttr(a)}</button>`).join('')}
 </div>` : '';
+// Leitura fonética bruta do segundo motor (ver nota acima) — puramente informativa: não
+// preenche nem substitui o campo de transcrição, só aparece como referência ao lado pra
+// ajudar a perceber quando o Whisper "corrigiu demais" pra uma palavra real.
+const garbledPhonemes = phoneticReading[i] && possiblyGarbledPhonemes(phoneticReading[i]);
+const phonemeReadingRow = phoneticReading[i] ? `
+<div class="asr-badge" style="display:block;margin-top:4px;" title="Segundo motor (reconhecimento de fonemas cru) — referência adicional, não é a transcrição e não entra na análise automática">🔤 Leitura fonética bruta: <code>${escapeAttr(phoneticReading[i])}</code>${garbledPhonemes ? ' ⚠️ contém símbolos que não existem em português — leitura pouco confiável desta vez' : ''}</div>` : '';
 const transcriptionRow = `
 <div class="word-transcription">
 <label for="transc_${i}">Transcrição da produção (o que foi dito/ouvido — edite para simular outra produção)${autoBadge}</label>
 <input type="text" id="transc_${i}" value="${escapeAttr(producedNow)}" oninput="setProducedText(${i}, this.value)" placeholder="">
+${phonemeReadingRow}
 ${liveErrorNote}
 ${matchWarning}
 ${hallucinationWarning}
