@@ -314,6 +314,22 @@ existia dentro da media query mobile (≤768px), por isso funcionava estreito e 
 .modal-foot{ padding:16px 24px; border-top:1px solid var(--border); display:flex; justify-content:flex-end; gap:10px;}
 .modal-close{ background:none; border:none; font-size:18px; cursor:pointer; color:var(--text-muted); }
 
+/* Respeita a preferência do sistema por menos movimento (WCAG 2.3.3 / prefers-reduced-motion).
+   O ponto vermelho de "gravando" e o spinner de carregamento são apenas reforço: o estado já é
+   comunicado pelo rótulo do botão ("Parar") e pela cor de fundo, então desligar a animação não
+   remove nenhuma informação. */
+@media (prefers-reduced-motion: reduce){
+*, *::before, *::after{
+animation-duration:.01ms !important; animation-iteration-count:1 !important;
+transition-duration:.01ms !important; scroll-behavior:auto !important;
+}
+.rec-btn.recording .rec-dot{ animation:none !important; opacity:1; }
+.spinner{ animation:none !important; border-top-color:rgba(255,255,255,.9); }
+.modal-backdrop[open] .modal{ animation:none !important; }
+.modal-backdrop::backdrop{ animation:none !important; }
+.view{ animation:none !important; }
+}
+
 .toggle{ position:relative; width:40px; height:22px; background:var(--grid); border-radius:99px; cursor:pointer; flex:none; transition:background .15s; border:none; padding:0; }
 .toggle.on{ background:var(--good); }
 .toggle::after{ content:""; position:absolute; top:2px; left:2px; width:18px; height:18px; background:white; border-radius:50%; transition:left .15s; box-shadow:0 1px 3px rgba(0,0,0,.3);}
@@ -416,6 +432,11 @@ table{ display:block; overflow-x:auto; max-width:100%; -webkit-overflow-scrollin
 .word-audio audio{ max-width:100%; width:100%; flex:1 1 100%; min-width:0; }
 .word-card{ min-width:0; }
 .word-main{ min-width:0; }
+/* Alvos de toque: no celular o "Gravar/Parar" é a ação principal da consulta e era renderizado
+   com ~26px de altura (padding 5px + fonte 11.3px), abaixo do mínimo de 44x44px recomendado.
+   Aqui só o tamanho muda — cor, rótulo e estados continuam os mesmos do desktop. */
+.rec-btn{ min-height:44px; padding:8px 14px; font-size:12.5px; }
+.clear-audio{ min-height:44px; padding:8px 12px; display:inline-flex; align-items:center; }
 }
 
 @media print{
@@ -2647,6 +2668,15 @@ document.getElementById('stepReport').classList.remove('current');
 document.getElementById('patientAge').addEventListener('change', ()=>{ if(aiRun) renderResults(); });
 
 function resetAssessment(){
+/* Ação destrutiva: apaga TODOS os áudios gravados/importados e todas as transcrições da avaliação
+   em andamento, sem desfazer. Pede confirmação nomeando o que se perde (mesmo padrão dos botões de
+   exclusão do banco de conhecimento). Se não há nada coletado ainda, reinicia direto — não faz
+   sentido perguntar sobre apagar zero itens. */
+const coletados = Object.keys(audioMap).length;
+if(coletados > 0){
+const msg = `Reiniciar a avaliação apaga ${coletados} áudio(s) já coletado(s) e todas as transcrições e revisões feitas até aqui. Esta ação não pode ser desfeita.\n\nSe quiser guardar este material, cancele e gere o laudo (ou exporte pelo banco de conhecimento) antes de reiniciar.\n\nDeseja mesmo reiniciar?`;
+if(!confirm(msg)) return;
+}
 Object.keys(audioMap).forEach(k=>URL.revokeObjectURL(audioMap[k].url));
 audioMap = {}; aiRun=false; reviewedSet = new Set(); knowledgeSavedSet = new Set();
 producedText = {}; manualOverride = {}; autoTranscribed = {}; whisperStatus = {}; producedAlternatives = {}; transcribeErrorNote = {};
