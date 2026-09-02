@@ -1774,8 +1774,27 @@ renderWordList();
 const MAX_RECORDING_MS = 15000;
 // Flag para cancelar gravação se o usuário clicar "Parar" enquanto getUserMedia está pendente
 let recordingCancelled = false;
+// true entre o clique em "Gravar" e o MediaRecorder existir de fato (janela do getUserMedia,
+// em que ainda não há activeRecorder para inspecionar).
+let recordingPending = false;
+
+/* Lock global de gravação, com auto-cura.
+   Só pode haver UMA gravação por vez (recordingIndex). O problema: se esse slot vazasse — o
+   MediaRecorder morrer por conta própria (erro do navegador, aba suspensa no celular, o
+   microfone ser tomado por outro app) — o onstop nunca rodava, recordingIndex ficava preso e
+   TODOS os botões "Gravar" seguintes nasciam disabled, sem nenhuma forma de destravar a não
+   ser recarregar a página. Era exatamente o relato de "a partir da palavra X não grava mais".
+   Aqui, em vez de confiar cegamente no valor de recordingIndex, conferimos se existe mesmo um
+   gravador vivo por trás dele; se não existe, o lock era fantasma e se solta sozinho. */
+function liveRecordingIndex(){
+if(recordingIndex === null) return null;
+if(recordingPending) return recordingIndex; // aguardando permissão do microfone: lock legítimo
+if(activeRecorder && activeRecorder.state !== 'inactive') return recordingIndex;
+activeRecorder = null; recordingIndex = null; // lock preso -> libera
+return null;
+}
 async function startRecording(i){
-if(recordingIndex !== null) return;
+if(liveRecordingIndex() !== null) return;
 if(!micSupported()){
 document.getElementById('micGlobalWarning').style.display='flex';
 return;
@@ -1793,6 +1812,7 @@ return;
 // o relato de "trava a partir de tal palavra e não volta". Reservar o slot já aqui fecha essa
 // janela de corrida; qualquer falha abaixo libera o slot de volta (recordingIndex = null).
 recordingIndex = i;
+recordingPending = true; // ainda não há MediaRecorder: segura o lock durante o getUserMedia
 recordingCancelled = false; // reset flag for this recording attempt
 renderWordList();
 try{
@@ -1801,6 +1821,7 @@ const stream = await navigator.mediaDevices.getUserMedia({audio:true});
 // e liberamos o stream do microfone imediatamente — evita MediaRecorder órfão rodando no vazio.
 if(recordingCancelled){
 stream.getTracks().forEach(t=>t.stop());
+recordingPending = false;
 recordingIndex = null;
 renderWordList();
 return;
@@ -1815,7 +1836,7 @@ clearTimeout(safetyTimer);
 const blob = new Blob(chunks, {type: mr.mimeType || 'audio/webm'});
 const durationMs = Date.now() - recordStartedAt;
 stream.getTracks().forEach(t=>t.stop());
-activeRecorder = null; recordingIndex = null;
+activeRecorder = null; recordingIndex = null; recordingPending = false;
 // Diagnóstico sempre visível no console (não só quando algo falha depois) — tamanho do blob
 // e duração da gravação são os dois sinais mais diretos pra separar "microfone não capturou
 // nada" de "capturou, mas o Whisper/decodeAudioData não deu conta do formato".
@@ -1831,26 +1852,56 @@ return;
 }
 setAudio(i, blob, 'gravado');
 };
+// Se o MediaRecorder morrer sozinho, o onstop pode nunca disparar. Sem este handler o lock
+// global ficava preso e desabilitava o "Gravar" de todas as palavras seguintes.
+mr.onerror = (ev)=>{
+clearTimeout(safetyTimer);
+console.warn(`MediaRecorder falhou (item ${i}):`, ev && ev.error);
+try{ stream.getTracks().forEach(t=>t.stop()); }catch(e){}
+activeRecorder = null; recordingIndex = null; recordingPending = false;
+transcribeErrorNote[i] = 'A gravação foi interrompida pelo navegador antes de terminar. Tente gravar de novo; se repetir, feche outros apps/abas que estejam usando o microfone.';
+renderWordList();
+};
+// O microfone pode ser revogado no meio (outro app assume, permissão retirada, tela bloqueia
+// no celular): a track termina e o gravador fica preso gravando o vazio.
+stream.getTracks().forEach(t=>{ t.onended = ()=>{ if(activeRecorder===mr && mr.state!=='inactive'){ try{ mr.stop(); }catch(e){} } }; });
 mr.start();
 activeRecorder = mr;
+recordingPending = false; // a partir daqui o lock é verificável via activeRecorder.state
 renderWordList();
 // Segunda rede de segurança, independente da causa: se por qualquer motivo o profissional
 // esquecer de clicar "Parar" (ou o clique não registrar), a gravação some sozinha depois de
 // MAX_RECORDING_MS em vez de deixar recordingIndex preso indefinidamente e travar o app.
-const safetyTimer = setTimeout(()=>{ if(activeRecorder===mr && mr.state!=='inactive') mr.stop(); }, MAX_RECORDING_MS);
+const safetyTimer = setTimeout(()=>{
+if(activeRecorder!==mr) return;
+try{ if(mr.state!=='inactive') mr.stop(); }
+catch(err){ // stop() pode lançar se o gravador já estiver num estado inválido: solta o lock na marra
+console.warn('Falha ao encerrar a gravação pelo tempo-limite:', err);
+try{ stream.getTracks().forEach(t=>t.stop()); }catch(e){}
+activeRecorder = null; recordingIndex = null; recordingPending = false; renderWordList();
+}
+}, MAX_RECORDING_MS);
 }catch(err){
 console.warn('Não foi possível acessar o microfone:', err);
-recordingIndex = null;
+recordingIndex = null; recordingPending = false;
 renderWordList();
 document.getElementById('micGlobalWarning').style.display='flex';
 }
 }
 function stopRecording(){
-if(activeRecorder && activeRecorder.state !== 'inactive'){ activeRecorder.stop(); }
+if(activeRecorder && activeRecorder.state !== 'inactive'){
+// stop() pode lançar InvalidStateError; sem o catch o lock ficava preso e travava as
+// palavras seguintes.
+try{ activeRecorder.stop(); }
+catch(err){
+console.warn('Falha ao parar a gravação:', err);
+activeRecorder = null; recordingIndex = null; recordingPending = false; renderWordList();
+}
+}
 else {
 // Se getUserMedia ainda está pendente, marcamos para cancelar quando resolver
 recordingCancelled = true;
-activeRecorder = null; recordingIndex = null; renderWordList();
+activeRecorder = null; recordingIndex = null; recordingPending = false; renderWordList();
 }
 }
 
@@ -2036,11 +2087,12 @@ const hadFocusId = document.activeElement && el.contains(document.activeElement)
 el.innerHTML = targetWords.map((w,i)=>{
 if(filter && !w.word.toLowerCase().includes(filter)) return '';
 const audio = audioMap[i];
-const isRecording = recordingIndex === i;
+const busyIndex = liveRecordingIndex();
+const isRecording = busyIndex === i;
 const cardClass = audio ? 'word-card has-audio' : 'word-card';
 const recBtn = isRecording
 ? `<button class="rec-btn recording" onclick="stopRecording()"><span class="rec-dot"></span> Parar</button>`
-: `<button class="rec-btn" onclick="startRecording(${i})" ${recordingIndex!==null?'disabled':''}>${ICON.mic} Gravar</button>`;
+: `<button class="rec-btn" onclick="startRecording(${i})" ${busyIndex!==null?'disabled':''}>${ICON.mic} Gravar</button>`;
 const whisperBtnLabel = whisperStatus[i]==='loading-model' ? (whisperLoadProgress ? `${ICON.clock2} Baixando modelo… ${whisperLoadProgress.progress}%` : `${ICON.clock2} Baixando modelo…`)
 : whisperStatus[i]==='transcribing' ? `${ICON.clock2} Transcrevendo…`
 : whisperStatus[i]==='error' ? `${ICON.warning} Tentar novamente`
