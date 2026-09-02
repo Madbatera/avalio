@@ -304,7 +304,10 @@ existia dentro da media query mobile (≤768px), por isso funcionava estreito e 
 
 /* Native <dialog> modal */
 .modal-backdrop{ padding:0; border:none; background:transparent; max-width:640px; width:calc(100% - 40px); margin:40px auto; overflow:visible; }
-.modal-backdrop::backdrop{ background:rgba(15,25,24,.48); }
+.modal-backdrop::backdrop{ background:rgba(15,25,24,.48); animation:backdropIn .25s ease; }
+.modal-backdrop[open] .modal{ animation:modalIn .3s cubic-bezier(.22,.9,.28,1); }
+@keyframes modalIn{ from{ opacity:0; transform:translateY(64px); filter:blur(8px);} to{ opacity:1; transform:translateY(0); filter:blur(0);} }
+@keyframes backdropIn{ from{ opacity:0; } to{ opacity:1; } }
 .modal{ background:white; border-radius:16px; width:100%; padding:0; box-shadow:0 20px 60px rgba(15,45,42,.22); }
 .modal-head{ padding:20px 24px; border-bottom:1px solid var(--border); display:flex; justify-content:space-between; align-items:center;}
 .modal-body{ padding:22px 24px; }
