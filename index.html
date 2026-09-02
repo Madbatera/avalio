@@ -1772,6 +1772,9 @@ renderWordList();
 // Tempo máximo de uma gravação — trava de segurança (ver nota abaixo sobre recordingIndex),
 // não uma limitação de UX: nenhuma palavra do protocolo deveria levar perto disso pra falar.
 const MAX_RECORDING_MS = 15000;
+// Tempo máximo de espera pelo getUserMedia (permissão de microfone) — Safari pode travar
+// indefinidamente mesmo com permissão "concedida"; um timeout evita que o app fique preso.
+const GET_USER_MEDIA_TIMEOUT_MS = 8000;
 // Flag para cancelar gravação se o usuário clicar "Parar" enquanto getUserMedia está pendente
 let recordingCancelled = false;
 // true entre o clique em "Gravar" e o MediaRecorder existir de fato (janela do getUserMedia,
@@ -1816,16 +1819,20 @@ recordingPending = true; // ainda não há MediaRecorder: segura o lock durante 
 recordingCancelled = false; // reset flag for this recording attempt
 renderWordList();
 try{
-const stream = await navigator.mediaDevices.getUserMedia({audio:true});
-// Se o usuário clicou "Parar" enquanto esperávamos permissão, cancelamos silenciosamente
-// e liberamos o stream do microfone imediatamente — evita MediaRecorder órfão rodando no vazio.
-if(recordingCancelled){
-stream.getTracks().forEach(t=>t.stop());
-recordingPending = false;
-recordingIndex = null;
-renderWordList();
-return;
-}
+	// getUserMedia com timeout — Safari pode travar indefinidamente mesmo com permissão concedida
+	const stream = await Promise.race([
+		navigator.mediaDevices.getUserMedia({audio:true}),
+		new Promise((_, reject) => setTimeout(() => reject(new Error('GET_USER_MEDIA_TIMEOUT')), GET_USER_MEDIA_TIMEOUT_MS))
+	]);
+	// Se o usuário clicou "Parar" enquanto esperávamos permissão, cancelamos silenciosamente
+	// e liberamos o stream do microfone imediatamente — evita MediaRecorder órfão rodando no vazio.
+	if(recordingCancelled){
+	stream.getTracks().forEach(t=>t.stop());
+	recordingPending = false;
+	recordingIndex = null;
+	renderWordList();
+	return;
+	}
 const mimeType = pickMimeType();
 const mr = new MediaRecorder(stream, mimeType ? {mimeType} : undefined);
 const chunks = [];
@@ -1885,6 +1892,10 @@ activeRecorder = null; recordingIndex = null; recordingPending = false; renderWo
 console.warn('Não foi possível acessar o microfone:', err);
 recordingIndex = null; recordingPending = false;
 renderWordList();
+// Trata timeout do getUserMedia especificamente — Safari pode travar mesmo com permissão OK
+if(err && err.message === 'GET_USER_MEDIA_TIMEOUT'){
+transcribeErrorNote[i] = 'O navegador não liberou o microfone a tempo (travou na solicitação de permissão). No Safari/iOS: (1) verifique se o site tem permissão de microfone nas configurações do navegador; (2) tente recarregar a página e clicar "Gravar" de novo logo após o carregamento; (3) se persistir, use "Importar" para enviar um arquivo de áudio gravado em outro app.';
+} else {
 document.getElementById('micGlobalWarning').style.display='flex';
 }
 }
